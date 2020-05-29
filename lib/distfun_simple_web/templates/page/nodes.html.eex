@@ -1,0 +1,5 @@
+<ul>
+    <%= for node <- @nodes do %>
+        <li><%= node %></li>
+    <% end %>
+</ul>
