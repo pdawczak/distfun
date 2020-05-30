@@ -134,19 +134,6 @@ resource "aws_instance" "web__az_1c" {
   }
 }
 
-# resource "aws_eip_association" "dojo_web" {
-#   instance_id   = aws_instance.prod_web.0.id
-#   allocation_id = aws_eip.dojo_web.id
-# }
-
-
-# resource "aws_eip" "front_web" {
-#   tags = {
-#     "Terraform" : "true",
-#     "Name" : "DistFunSimple"
-#   }
-# }
-
 ####
 #
 # Reimplement Loadbalancing to a new Application
