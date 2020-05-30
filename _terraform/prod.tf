@@ -8,9 +8,32 @@ provider "aws" {
   region     = "us-west-1"
 }
 
-resource "aws_s3_bucket" "my_s3" {
+data "aws_elb_service_account" "front_web_lb_account" {}
+
+resource "aws_s3_bucket" "lb_logs" {
   bucket = "distfun-simple-tf-fun-09876"
-  acl = "log-delivery-write"
+  acl    = "private"
+
+  policy = <<POLICY
+{
+  "Id": "Policy",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:s3:::distfun-simple-tf-fun-09876/logs/AWSLogs/*",
+      "Principal": {
+        "AWS": [
+          "${data.aws_elb_service_account.front_web_lb_account.arn}"
+        ]
+      }
+    }
+  ]
+}
+POLICY
 
   tags = {
     "Terraform" : "true",
@@ -154,6 +177,12 @@ resource "aws_lb" "front_web" {
   security_groups = [
     aws_security_group.web.id
   ]
+
+  access_logs {
+    bucket  = aws_s3_bucket.lb_logs.bucket
+    prefix  = "logs"
+    enabled = true
+  }
 
   tags = {
     "Terraform" : "true",
