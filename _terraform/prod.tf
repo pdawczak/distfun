@@ -204,46 +204,6 @@ resource "aws_lb_target_group_attachment" "front_web_i3" {
 #
 #####
 
-resource "aws_elb" "front_web" {
-  name = "front-web"
-  instances = [
-    aws_instance.web.0.id,
-    aws_instance.web.1.id,
-    aws_instance.web__az_1c.0.id,
-  ]
-  subnets = [
-    aws_default_subnet.default_az1.id,
-    aws_default_subnet.default_az2.id,
-  ]
-  security_groups = [aws_security_group.web.id]
-
-  # access_logs {
-  #   bucket        = aws_s3_bucket.my_s3.bucket
-  #   bucket_prefix = "access_logs"
-  #   interval      = 60
-  # }
-
-  listener {
-    instance_port     = 4000
-    instance_protocol = "tcp"
-    lb_port           = 80
-    lb_protocol       = "tcp"
-  }
-
-  health_check {
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    timeout             = 3
-    target              = "HTTP:4000/"
-    interval            = 30
-  }
-
-  tags = {
-    "Terraform" : "true",
-    "Name" : "DistFunSimple"
-  }
-}
-
 #####
 #
 # OUTPUTS
@@ -253,11 +213,6 @@ output "ec2_instances" {
     aws_instance.web.*.public_ip,
     aws_instance.web__az_1c[0].public_ip,
   ])
-}
-
-
-output "lb_public_dns" {
-  value = aws_elb.front_web.dns_name
 }
 
 output "alb_public_dns" {
