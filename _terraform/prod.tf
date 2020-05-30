@@ -185,6 +185,11 @@ resource "aws_lb_target_group" "front_web" {
   health_check {
     path = "/health"
   }
+
+  tags = {
+    "Terraform" : "true",
+    "Name" : "DistFunSimple"
+  }
 }
 
 resource "aws_lb_target_group_attachment" "front_web_i1" {
