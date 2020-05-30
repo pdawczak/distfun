@@ -154,6 +154,11 @@ resource "aws_lb" "front_web" {
   security_groups = [
     aws_security_group.web.id
   ]
+
+  tags = {
+    "Terraform" : "true",
+    "Name" : "DistFunSimple"
+  }
 }
 
 resource "aws_lb_listener" "front_web" {
