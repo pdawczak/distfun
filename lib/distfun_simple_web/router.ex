@@ -17,10 +17,12 @@ defmodule DistfunSimpleWeb.Router do
   scope "/", DistfunSimpleWeb do
     pipe_through :browser
 
-    live "/", PageLive, :index
-
-    get "/nodes", PageController, :nodes
+    # HTTP Pages
+    get "/", PageController, :nodes
     get "/health", PageController, :health
+
+    # Live View pages
+    live "/nodes_live", PageLive, :index
   end
 
   # Other scopes may use custom stacks.
