@@ -4,7 +4,7 @@ defmodule DistfunSimple.ClusterManager do
   require Logger
 
   defmodule State do
-    defstruct(me: nil, other_nodes: [], listeners: nil)
+    defstruct me: nil, other_nodes: [], listeners: nil
 
     def new(me) do
       %State{me: me, other_nodes: [], listeners: MapSet.new()}
