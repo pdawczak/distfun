@@ -1,1 +1,1 @@
-(cd _terraform && terraform output -json ec2_instances | jq '.[]' | xargs -t -P 8 -I % sh -c 'scp -o "StrictHostKeyChecking no" ../built_release/$(ls built_release | tail -n 1) ec2-user@%:~/artifact.tar.gz')
+(cd _terraform && terraform output -json ec2_instances | jq '.[]' | xargs -t -P 8 -I % sh -c 'scp -o "StrictHostKeyChecking no" "../built_release/$(ls ../built_release | tail -n 1)" ec2-user@%:~/artifact.tar.gz')
