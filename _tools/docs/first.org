@@ -1,0 +1,555 @@
+* Distributed Elixir App in AWS
+
+Let's build a distributed application. A very simple one, but the one that
+will show us some interesting building blocks and demystify some concepts.
+
+This very simple application that will track automatically nodes in the 
+cluster, will allow dynamicaly displaying the list of nodes over web sockets.
+It will be deployed to multiple EC2 insances in AWS and compiled locally, using
+Docker.
+
+This will be a series of posts:
+
+- Build the application
+- Make it compile locally, but make it run in EC2
+- Create the whole infrastructure using Terraform
+
+It's not comprehensive guide and will not be applicable in all usecases, it
+will not meet all the best security standards, as this guide is intended to
+show some interesting concepts and give a starting point for your development.
+
+Interested? Let's start!
+
+** Start new project
+
+It will be very simple app and we will not need DB access, but we will use
+the new Phoenix' generator to provide the initial code for LiveView, which
+we will use for real-time capabilities:
+
+#+begin_src sh
+> mix phx.new distfun_simple --no-ecto --live
+#+end_src
+
+First, let's implement a ~GenServer~, that will track all the nodes connected
+in cluster. Let's build the initial functionality that will allow us starting
+a new process:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  use GenServer
+
+  def start_link(_) do
+    GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+  end
+
+  def init(:ok) do
+    :net_kernel.monitor_nodes(true) # 1.
+
+    state = %{
+      me: node(),
+      other_nodes: []
+    }
+
+    {:ok, state}
+  end
+
+  # ...
+end
+#+end_src
+
+Fairly standard implementation for ~GenServer~. Important is the point ~1.~.
+It will register the process to monitor the nodes that will join and leave
+the cluster. We will get back to what it provide a bit later...
+
+Next, let's add very basic public interface that will allow returning the list
+of all nodes in the cluster the process is aware of:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  # ...
+
+  def get_all_nodes() do
+    GenServer.call(__MODULE__, :get_all_nodes)
+  end
+
+  # ...
+
+  def handle_call(:get_all_nodes, _from, state) do
+    all_nodes = [state.me] ++ state.other_nodes
+    {:reply, all_nodes, state}
+  end
+end
+#+end_src
+
+It will return the list of all nodes, including the node the application is
+running, but will make it a very first entry in the list. It will be useful 
+later, for demonstration purposes, when we will hid all the apps behind
+load balancer.
+
+Next, let's handle the information the process will receive when a new node
+will join the cluster (it will be of a form of ~{:nodeup, node}~) or leave the
+cluster (it will look like ~{:nodedown, node}~). Both of them will be handled
+by ~handle_info~ callback:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  # ...
+
+  def handle_info({:nodeup, node}, state) do
+    sorted_other_nodes = Enum.sort([node | state.other_nodes])
+    new_state = %{state | other_nodes: sorted_other_nodes}
+
+    {:noreply, new_state}
+  end
+
+  def handle_info({:nodedown, node}, state) do
+    new_state = %{state | other_nodes: state.other_nodes -- [node]}
+
+    {:noreply, new_state}
+  end
+end
+#+end_src
+
+It's only a few lines of code, but it already starts to feel quite messy, so 
+let's take this opportunity to refactor it a bit. First, let's introduce a 
+submodule to store our state:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  # ...
+  defmodule State do
+    defstruct me: nil, other_nodes: [] 
+
+    def new(me) do
+      %State{me: me, other_nodes: []}
+    end
+
+    def all(%State{me: me, other_nodes: other_nodes}) do
+      [me | other_nodes]
+    end
+
+    def add_node(%State{} = state, node) do
+      sorted_other_nodes = Enum.sort([node | state.other_nodes])
+      %{state | other_nodes: sorted_other_nodes}
+    end
+
+    def remove_node(%State{} = state, node) do
+      %{state | other_nodes: state.other_nodes -- [node]}
+    end
+  end
+  # ...
+end
+#+end_src
+
+Next, let's use the new functions in our ~GenServer~ callbacks:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  # ...
+
+  def init(:ok) do
+    :net_kernel.monitor_nodes(true)
+
+    {:ok, State.new(node())}
+  end
+
+  def handle_call(:get_all_nodes, _from, %State{} = state) do
+    {:reply, State.all(state), state}
+  end
+
+  def handle_info({:nodeup, node}, %State{} = state) do
+    new_state = State.add_node(state, node)
+
+    {:noreply, new_state}
+  end
+
+  def handle_info({:nodedown, node}, %State{} = state) do
+    new_state = State.remove_node(state, node)
+
+    {:noreply, new_state}
+  end
+end
+#+end_src
+
+Great! Looks much cleaner!
+
+Next, let's make sure the ~ClusterManager~ will start alongside the app. In
+order to do so, we need to modify ~Application~:
+
+#+begin_src elixir
+# distfun_simple/lib/application.ex
+defmodule DistfunSimple.Application do
+  # ...
+
+  def start(_type, _args) do
+    children = [
+      # ...
+      DistfunSimple.ClusterManager
+    ]
+
+    # ...
+  end
+
+  # ...
+end
+#+end_src
+
+We are nearly ready to test it in action, but there is one more change we need
+to add. At the moment, Phoenix web server will start on port ~4000~, but we 
+will want to start more nodes, so to avoid port conflicts, let's make the port
+to be confugurable.
+
+Let's open configuration and change:
+
+#+begin_src elixir
+# distfun_simple/config/dev.exs
+config :distfun_simple, DistfunSimpleWeb.Endpoint,
+  http: [port: 4000],
+  # ...
+#+end_src
+
+to:
+
+#+begin_src elixir
+# distfun_simple/config/dev.exs
+config :distfun_simple, DistfunSimpleWeb.Endpoint,
+  http: [
+    port: String.to_integer(System.get_env("PORT") || "4000"),
+  ],
+  # ...
+#+end_src
+
+And let's see it in action. First, let's start two instances of the app. In two
+separate terminals, run the following:
+
+#+begin_src sh
+> PORT=4000 iex --sname a -S mix
+#+end_src
+
+#+begin_src sh
+> PORT=4001 iex --sname b -S mix
+#+end_src
+
+And now, from one of the instances, let's try to connect to the other one. Here,
+I'll execute the following from my ~b~ node:
+
+#+begin_src sh
+iex(b@macpdawczak1)2> Node.connect(:a@macpdawczak1)
+true
+iex(b@macpdawczak1)3> DistfunSimple.ClusterManager.get_all_nodes()
+[:b@macpdawczak1, :a@macpdawczak1]
+#+end_src
+
+Looks promising! Let's test the following in the other:
+
+#+begin_src sh
+iex(a@macpdawczak1)3> DistfunSimple.ClusterManager.get_all_nodes()
+[:a@macpdawczak1, :b@macpdawczak1]
+#+end_src
+
+Great! It works!
+
+In the next step, let's open our ~ClusterManager~ for other processes to listen
+for changes in the registered nodes' lists.
+
+Firstly, let's add che changes to our ~State~:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  # ...
+  defmodule State do
+    defstruct me: nil, other_nodes: [] 
+
+    def new(me) do
+      %State{me: me, other_nodes: []}
+    end
+    # ...
+  end
+  # ...
+end
+#+end_src
+
+to:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  # ...
+  defmodule State do
+    defstruct me: nil, other_nodes: [], listeners: nil
+
+    def new(me) do
+      %State{me: me, other_nodes: [], listeners: MapSet.new()}
+    end
+    # ...
+  end
+  # ...
+end
+#+end_src
+
+Next, let's update the interface to allow registering processes. Upon 
+registering, we would like to give access to a copy of the already stored 
+~nodes~. We can do it like that:
+
+#+begin_src elixir
+# distfun_simple/lib/cluster_manager.ex
+defmodule DistfunSimple.ClusterManager do
+  # ...
+  defmodule State do
+    def register_listener(%State{} = state, listener) do
+      %{state | listeners: MapSet.put(state.listeners, listener)}
+    end
+    # ...
+  end
+
+  def get_all_nodes_and_subscribe() do
+    GenServer.call(__MODULE__, {:get_all_nodes_and_subscribe, self()})
+  end
+
+  # ...
+
+  def handle_call({:get_all_nodes_and_subscribe, listener}, _from, %State{} = state) do
+    new_state = State.register_listener(state, listener)
+
+    Process.monitor(listener) # Monitor the registered process
+
+    {:reply, State.all(state), new_state}
+  end
+
+  # ...
+end
+#+end_src
+
+Our ~ClusterManager~ will store a list of all ~listener~s interested to be 
+notified about changes in the list of nodes in the cluster; but processes can
+finish their work, exit or even die and will be unable to de-register them 
+selves. This is why we set the ~monitor~, so as soon as the ~listener~ goes 
+down, our ~ClusterManager~ will recieve a new message indicating this fact.
+
+When a process monitors another process, and that process "goes down", the 
+message will be delivered to a monitoring process and will be a tuple of 
+following format:
+
+#+begin_src elixir
+{:DOWN, ref, :process, pid, reason}
+#+end_src
+
+In case of a ~GenServer~, this message will be handled by ~handle_info~ 
+callback. All we have to do is to add that function that will handle the 
+message, let's do it next:
+
+#+begin_src elixir
+defmodule DistfunSimple.ClusterManager do
+  # ...
+
+  defmodule State do
+    # ...
+
+    def deregister_listener(%State{} = state, listener) do
+      %{state | listeners: MapSet.delete(state.listeners, listener)}
+    end
+  end
+
+  # ...
+
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, %State{} = state) do
+    new_state = State.deregister_listener(state, pid)
+
+    {:noreply, new_state}
+  end
+end
+#+end_src
+
+Great! Now, when we have infrastucture in place, let's add a functionality to 
+notify ~listener~s.
+
+First, let's add a function that will broadcast updated list of nodes to all
+listeners:
+
+#+begin_src elixir
+defmodule DistfunSimple.ClusterManager do
+  # ...
+
+  defp broadcast(%State{} = state) do
+    Enum.each(
+      state.listeners,
+      &send(&1, {:nodes_updated, State.all(state)})
+    )
+
+    state
+  end
+end
+#+end_src
+
+It will accept ~GenServer~'s internal state, and will return it. It will allow
+us compose it nicely with the rest of the code using pipe operator. Let's do
+it next - in the functions that are invoked every time a node joins the cluster
+or leaves it, let's change the code to look like the following:
+
+#+begin_src elixir
+defmodule DistfunSimple.ClusterManager do
+  # ...
+
+  def handle_info({:nodeup, node}, %State{} = state) do
+    new_state =
+      state
+      |> State.add_node(node)
+      |> broadcast()
+
+    {:noreply, new_state}
+  end
+
+  def handle_info({:nodedown, node}, %State{} = state) do
+    new_state =
+      state
+      |> State.remove_node(node)
+      |> broadcast()
+
+    {:noreply, new_state}
+  end
+
+  # ...
+end
+#+end_src
+
+With that in place, let's give it a try and see how it works - shall we?
+
+Let's start two ~iex~ sessions again:
+
+#+begin_src sh
+> PORT=4000 iex --sname a -S mix
+#+end_src
+
+#+begin_src sh
+> PORT=4001 iex --sname b -S mix
+#+end_src
+
+In shell ~a~, let's use this new function to get list of nodes and subscribe:
+
+#+begin_src sh
+iex(a@macpdawczak1)1> DistfunSimple.ClusterManager.get_all_nodes_and_subscribe()
+[:a@macpdawczak1]
+#+end_src
+
+That's correct, for now we have two instances running separately and the next
+thing to do is to connect them. Let's do the following in session ~b~:
+
+#+begin_src sh
+iex(b@macpdawczak1)1> Node.connect(:a@macpdawczak1)
+true
+#+end_src
+
+and back in session ~a~, as it's the ~iex~ session's process that's subscribed
+for updates, we can use ~flush()~ to see all the messages in it's mailbox. 
+Let's try it next:
+
+#+begin_src sh
+iex(a@macpdawczak1)2> flush()
+{:nodes_updated, [:a@macpdawczak1, :b@macpdawczak1]}
+:ok
+#+end_src
+
+Perfect! It did receive a new message with the updated list of nodes! 
+Next, let's kill the session ~b~, that is connected to cluster, and see what
+happens! In session ~b~, hit ~ctrl-c~ + ~ctrl-c~, and again in session ~a~:
+
+#+begin_src sh
+iex(a@macpdawczak1)4> flush()
+{:nodes_updated, [:a@macpdawczak1]}
+:ok
+#+end_src
+
+It works!
+
+** Going Web
+
+Now, when we have lower-level components ready, let's try to expose the
+information through web interface.
+
+The way we generated the app, it already set up a new route for us, for 
+live-view. Let's change the url where it will be mounted as follows:
+
+#+begin_src sh
+# lib/distfun_simple_web/router.ex
+defmodule DistfunSimpleWeb.Router do
+  # ...
+  scope "/", DistfunSimpleWeb do
+    live "/nodes_live", PageLive, :index
+  end
+  #...
+end
+#+end_src
+
+Next, let's update the ~PageLive~. Let's make ~mount~ to look like the 
+following:
+
+#+begin_src elixir
+# lib/distfun_simple_web/live/page_live.ex
+defmodule DistfunSimpleWeb.PageLive do
+  use DistfunSimpleWeb, :live_view
+
+  alias DistfunSimple.ClusterManager
+
+  def mount(_params, _session, socket) do
+    socket =
+      if connected?(socket) do # 3.
+        assign(socket, :nodes, ClusterManager.get_all_nodes_and_subscribe()) # 2.
+      else
+        assign(socket, :nodes, ClusterManager.get_all_nodes()) # 1.
+      end
+
+    {:ok, socket}
+  end
+end
+#+end_src
+
+As ~mount~ will be invoked twice - first time, when user "visits" the page,
+it will perform "standard" HTTP call. This will return a "static" web page,
+and for this purpose, it will be just enough, to obrain a list of currently
+registered nodes: ~get_all_nodes()~.
+
+However, after this "static" page is loaded, and JavaScript will initiate the
+Web socket connection, it will invoke ~mount~ again! But this time, it will be
+a new long-running process. ~connected?~ is a function, that helps determining
+exactly that, and it's that case, we want the WebSocket's process to
+subscribe for the changes of the list of nodes.
+
+Now, when the WebSocket's process is subscribed for the changes, every time the
+change will occur, the process will be notified and will receive a message that
+will be handled by ~handle_info~ callback. Let's implement it next:
+
+#+begin_src elixir
+# lib/distfun_simple_web/live/page_live.ex
+defmodule DistfunSimpleWeb.PageLive do
+  # ...
+  def handle_info({:nodes_updated, new_nodes}, socket) do
+    socket = assign(socket, :nodes, new_nodes)
+
+    {:noreply, socket}
+  end
+end
+#+end_src
+
+All it will do is to receive the new list of nodes, and assign it to the
+~socket~. So last piece of work we need is to provide a template for displaying
+this list. Let's add it next:
+
+#+begin_src elixir
+# lib/distfun_simple_web/live/page_live.html.leex
+<ul>
+  <%= for node <- @nodes do %>
+    <li><%= node %></li>
+  <% end %>
+</ul>
+#+end_src
+
+With the changes in place, let's start two servers, visit them in separate
+browsers, navigate to the live-view page, and then, connect the nodes:
+
+Demo: https://youtu.be/lCYxKtvLIHA
