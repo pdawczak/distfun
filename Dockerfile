@@ -37,9 +37,9 @@ RUN set -xe \
     && tar -xzf otp_src.tar.gz -C $ERL_TOP --strip-components=1 \
     && rm otp_src.tar.gz \
     && ( cd $ERL_TOP \
-    && ./configure \
-    && make \
-    && make install )
+        && ./configure \
+        && make \
+        && make install )
 
 # Install Elixir
 RUN set -xe \
