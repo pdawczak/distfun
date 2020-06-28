@@ -1,0 +1,474 @@
+* Distributed Elixir App in AWS
+
+Now, when we have our application ready, it would be great to put it somewhere
+live. If you're any familiar with the state of compiling Elixir (or any BEAM
+base language), it is nothing like Java, that you can compile your application
+in one environment and deploy it to a different one.
+
+As unfortunate as it sounds, there are a few options - you can either download
+the source code to the machine where you're going to run you application and
+compile it there, or, another option mentioned is to compile it in Docker, so
+you can replicate the destination's environment anywhere.
+
+In this blog post it's the "Docker approach" I wanted to try...
+
+** AWS' system on my computer?
+
+For the purpose of this App, I'll use the default AWS' system. In the docker
+hub, there is an official image that can be used for building your containers!
+
+Let's use it:
+
+#+begin_src dockerfile
+FROM amazonlinux:2.0.20200406.0
+#+end_src
+
+Later, when we will be installing dependencies for Erlang and Elixir, they will
+rely on specific encoding configured, let's do it next:
+
+#+begin_src dockerfile
+ENV LANG=C.UTF-8
+#+end_src
+
+Now we can start installing lower-level dependencies in the system that will be
+required for compiling our application. Let's do the following:
+
+#+begin_src dockerfile
+RUN yum update -y
+RUN yum install -y deltarpm
+RUN yum groupinstall -y "Development Tools"
+RUN yum install -y \
+    gcc \
+    gcc-c++ \
+    make \
+    libxslt \
+    fop \
+    ncurses-devel \
+    openssl-devel \
+    *openjdk-devel \
+    unixODBC \
+    unixODBC-devel \
+    zip \
+    git \
+    python \
+    wget \
+    tar
+RUN yum clean all
+RUN rm -rf /var/cache/yum
+#+end_src
+
+This will update system, install compilers and other tools that Erlang's compiler
+will require. Additionally, as a matter of best practice - let's clean all
+unnecessary artifacts and remove the cache.
+
+At this point, we should have all low-level dependencies in place, so we can start
+installing and compiling languages we will need.
+
+First, let's install Node we will use to compile our assets:
+
+#+begin_src dockerfile
+RUN curl -sL https://rpm.nodesource.com/setup_10.x | bash - \
+    && yum install -y nodejs
+#+end_src
+
+Next, let's install Erlang:
+
+#+begin_src dockerfile
+RUN set -xe \
+    && ERL_ARCH="http://erlang.org/download/otp_src_23.0.tar.gz" \
+    && ERL_TOP="/usr/src/erlang" \
+    && wget -O otp_src.tar.gz "$ERL_ARCH" \
+    && mkdir -vp $ERL_TOP \
+    && tar -xzf otp_src.tar.gz -C $ERL_TOP --strip-components=1 \
+    && rm otp_src.tar.gz \
+    && ( cd $ERL_TOP \
+        && ./configure \
+        && make \
+        && make install )
+#+end_src
+
+Finally, Elixir itself:
+
+#+begin_src dockerfile
+RUN set -xe \
+    && ELIXIR_ARCH="https://github.com/elixir-lang/elixir/releases/download/v1.10.3/Precompiled.zip" \
+    && ELIXIR_TOP="/usr/src/elixir" \
+    && mkdir -vp $ELIXIR_TOP \
+    && wget -O elixir_src.zip $ELIXIR_ARCH \
+    && unzip elixir_src.zip -d $ELIXIR_TOP \
+    && rm elixir_src.zip
+
+ENV PATH="$PATH:/usr/src/elixir/bin"
+#+end_src
+
+We've got nearly all we need. Node, Erlang and Elixir, so next, let's install
+build tools: ~hex~ and ~rebar~.
+
+#+begin_src dockerfile
+RUN mix local.hex --force && \
+    mix local.rebar --force
+#+end_src
+
+With this in place, let's move the application's sources to the container:
+
+#+begin_src dockerfile
+COPY mix.exs mix.lock ./
+COPY config config
+
+COPY assets/package.json assets/package-lock.json ./assets/
+
+COPY priv priv
+COPY assets assets
+
+COPY lib lib
+#+end_src
+
+All the above will be only required as "one off" kid of activity. Compiling the
+Application will be a little bit more involved and I didn't find better way of
+expressing it than in a custom shell script.
+
+Let's make ~Dockerfile~ to move it in and execute as a default command:
+
+#+begin_src dockerfile
+COPY _tools/build.sh build.sh
+
+CMD ./build.sh
+#+end_src
+
+Now, let's implement the shell script itself.
+
+There will be a few ~export~s we will need to configure as they will be read
+during compilation. First, let's make sure the application will be compiled in
+the ~prod~ environment:
+
+#+begin_src sh
+export MIX_ENV=prod
+#+end_src
+
+Secondly, for the application we will need to install only the production-required
+dependencies, plus, compilation for the production environment will require
+setting ~SECRET_KEY_BASE~, for security purposes.
+
+Normally, ~Phoenix~ has a mix command that will generate one for us, but at this
+point we didn't install any dependencies yet! To avoid downloading them twice
+once for development environment, to generate ~SECRET_KEY_BASE~ and then again,
+to install production required only dependencies, we can actually generate
+~SECRET_KEY_BASE~ ourselves:
+
+#+begin_src sh
+export SECRET_KEY_BASE=$(LC_ALL=C tr -dc 'A-Za-z0-9!"#$%&'\''()*+,-./:;<=>?@[\]^_`{|}~' </dev/urandom | head -c 64)
+#+end_src
+
+Perfect! With this in place, we can now download dependencies and compile them:
+
+#+begin_src sh
+mix do deps.get, deps.compile
+#+end_src
+
+Next, we can compile our frontend assets:
+
+#+begin_src sh
+npm --prefix ./assets ci --progress=false --no-audit --loglevel=error
+npm run --prefix ./assets deploy
+#+end_src
+
+and generate manifests, so ~Phoenix~ knows how to identify generated artifacts:
+
+#+begin_src sh
+mix phx.digest
+#+end_src
+
+Finally, we can compile the application itself:
+
+#+begin_src sh
+mix compile
+#+end_src
+
+Now, when that's ready, we can use Elixir's built in ~release~ tool to actually
+generate the release. Let's do it an put it temporarily in ~/artifact~:
+
+#+begin_src sh
+mix release --path /artifact
+#+end_src
+
+Because this command doesn't compress it to one file, we will need to do it
+manually:
+
+#+begin_src sh
+tar -czvf artifact.tar.gz /artifact
+#+end_src
+
+And finally, let's move generated ~tar~ to a directory we will mount into the
+image every time we will run docker. On this occasion, to avoid potential
+conflicts in file names when we run the command multiple times, let's rename
+the file in a way we will prepend the timestamp:
+
+#+begin_src sh
+mv artifact.tar.gz "/built_release/$(date +"%s")-artifact.tar.gz"
+#+end_src
+
+** The first release
+
+Now, with the ~Dockerfile~ in place, let's give it a try. Let's build the image
+first:
+
+#+begin_src sh
+docker build -t distfun_simple .
+#+end_src
+
+This will take quite considerable amount of time as it will download Erlang's
+source and compile it. There is not much we can do about it at this point. Once
+this is complete, let's create a local directory we will later mount when running
+the image:
+
+#+begin_src sh
+mkdir built_release
+#+end_src
+
+And finally, let's use the image to generate a release for us:
+
+#+begin_src sh
+docker run -v "${PWD}/built_release":/built_release -it distfun_simple
+#+end_src
+
+Here, I'll let docker to mount my local directory, the directory it will use
+to output the generated ~tar~ file. After that completes, I can see, there
+certainly is a compiled and compressed release:
+
+#+begin_src sh
+ls -la built_release
+-rw-r--r--  1 pawel.dawczak staff 15573828 May 28 20:24 1590693877-artifact.tar.gz
+#+end_src
+
+It wouldn't make much sense to untar it on my computer and start the app, as it
+wont work - remember? We've compiled it for the AWS' system architecture!
+
+Let's start a new EC2 instance and give the release a go!
+
+** EC2 setup
+
+Firstly, in AWS, let's go to the EC2 console:
+
+#+CAPTION: EC2 Console 1
+[[./img/02/01.png]]
+
+#+CAPTION: EC2 Console 2
+[[./img/02/02.png]]
+
+Then, let's choose Amazon Linux as a system for the instance:
+
+#+CAPTION: System selection
+[[./img/02/03.png]]
+
+For the next few screens, let's just use defaults:
+
+#+CAPTION: Instance type selection
+[[./img/02/04.png]]
+
+#+CAPTION: Instance configuration
+[[./img/02/05.png]]
+
+#+CAPTION: Storage configuration
+[[./img/02/06.png]]
+
+#+CAPTION: Adding tags
+[[./img/02/07.png]]
+
+Now, in the security groups' screen, by default, there will be ~SSH~ port
+pre-configured already; as we're going to host our web app here, let's add one
+more configuration - by default, Phoenix' web server will start on a port ~4000~,
+so let's configure that one:
+
+#+CAPTION: Security Group config
+[[./img/02/08.png]]
+
+Then, let's confirm our selections in the summary screen:
+
+#+CAPTION: Summary screen
+[[./img/02/09.png]]
+
+Finally, we will be required to configure access keys. In my case I'll re-use
+already created keys, but in your case, you might be prompted to create a new
+set of keys, and download the file.
+
+Let's do it:
+
+#+CAPTION: Key pair selection
+[[./img/02/10.png]]
+
+After a while, the instance should be up and running. It will have ~IP~ address
+attached to it, so let's take a note of it, as it will be important in a moment:
+
+#+CAPTION: Ready instance
+[[./img/02/11.png]]
+
+** But does it really work?
+
+Now, when the instance is readt, let's upload the ~tar~. Notice, when
+constructing command for ~scp~, we will need to specify the format of the
+destination like: ~<user>@<ip_address>:<path/to/upload>~.
+
+User, in this case will always be ~ec2-user~ and the ~ip_address~ is the one
+that has been allocated to our instance - check the previous screenshot.
+
+Additionally, it is also important to specify ~-i~ flag, that points to the file
+with key-pair we have just downloaded. In my case, the file is located in the
+current directory and the file is named ~distfun_simple.pem~:
+
+#+begin_src sh
+scp -i distfun_simple.pem built_release/1590693877-artifact.tar.gz ec2-user@54.219.109.17:~/built_release.tar.gz
+#+end_src
+
+Then, let's ssh into the instance:
+
+#+begin_src sh
+ssh -i distfun_simple.pem ec2-user@54.219.109.17
+#+end_src
+
+untar the file:
+
+#+begin_src sh
+tar -xzf built_release.tar.gz
+#+end_src
+
+and let's start the application:
+
+#+begin_src sh
+./artifact/bin/distfun_simple start
+#+end_src
+
+If there were no errors, we should be able to visit the page.
+
+For this, we can use another property allocated to our instance, the Public DNS:
+
+#+CAPTION: Allocated Public DNS
+[[./img/02/12.png]]
+
+Let's use is in the browser, and remember - the server is started using port
+~4000~, so we need to specify it in the url:
+
+http://ec2-54-219-109-17.us-west-1.compute.amazonaws.com:4000
+
+#+CAPTION: Static page listing nodes in the cluster
+[[./img/02/13.png]]
+
+And we can see it is live!
+
+Let's try to visit the live-view page:
+
+http://ec2-54-219-109-17.us-west-1.compute.amazonaws.com:4000/nodes_live
+
+#+CAPTION: LiveView page listing nodes in the cluster
+[[./img/02/14.png]]
+
+And it seems to be loading fine initially, but the spinner is constantly
+displayed and the reload of the page seems to be happening!
+
+If we take a look at the console where we're running the app, we can see the
+following error:
+
+#+begin_src sh
+[error] Could not check origin for Phoenix.Socket transport.
+
+Origin of the request: http://ec2-54-219-109-17.us-west-1.compute.amazonaws.com:4000
+
+This happens when you are attempting a socket connection to
+a different host than the one configured in your config/
+files. For example, in development the host is configured
+to "localhost" but you may be trying to access it from
+"127.0.0.1". To fix this issue, you may either:
+
+  1. update [url: [host: ...]] to your actual host in the
+     config file for your current environment (recommended)
+
+  2. pass the :check_origin option when configuring your
+     endpoint or when configuring the transport in your
+     UserSocket module, explicitly outlining which origins
+     are allowed:
+
+        check_origin: ["https://example.com",
+                       "//another.com:888", "//other.com"]
+#+end_src
+
+Hmm... let's try to follow this suggestion to update our config file and point
+the ~host~ to the value assigned in AWS console:
+
+#+begin_src elixir
+# config/prod.exs
+  url: [
+    host: "ec2-54-219-109-17.us-west-1.compute.amazonaws.com",
+    port: 80
+  ],
+#+end_src
+
+Next, let's generate a new release and deploy it with the following commands:
+
+#+begin_src sh
+docker build -t distfun_simple .
+#+end_src
+
+#+begin_src sh
+docker run -v "${PWD}/built_release":/built_release -it distfun_simple
+#+end_src
+
+Pro tip - you can make it a one-line command by chaining the commands with ~&&~:
+
+#+begin_src sh
+docker build -t distfun_simple . &&  docker run -v "${PWD}/built_release":/built_release -it distfun_simple
+#+end_src
+
+You will notice, this time ~build~ is much faster, as docker doesn't have to go
+through all the steps of downloading and compiling Erlang and Elixir - they are
+cached! It does, however, load our source files in, and in the process of ~run~,
+it generates a new ~release~ with updated code.
+
+Let's upload it next - notice, there are two compressed files here, as we have
+generated the ~release~ twice! Now you can see how convenient it was to make
+docker to prepend the timestamp to the generated tar file, so they don't conflict
+with each other:
+
+#+begin_src sh
+scp -i distfun_simple.pem built_release/1590693877-artifact.tar.gz ec2-user@54.219.109.17:~/built_release.tar.gz
+#+end_src
+
+and back in the EC2 instance, if you still have you're app running, just stop it
+with ~CTRL+C~ ~CTRL+C~, untar the new release and start it:
+
+#+begin_src sh
+[ec2-user@ip-172-31-31-175 ~] tar -xzf built_release.tar.gz
+[ec2-user@ip-172-31-31-175 ~]$ ./artifact/bin/distfun_simple start
+#+end_src
+
+This time both our URLs work, and there is no error, nor spinner displayed in
+the live-view page, which means - our WebSocket connection has been established
+successfully!
+
+That was very productive day! Let's finish this exercise here today and don't
+forget to terminate the instance to avoid incurring any costs if you don't need
+the instance anymore:
+
+#+CAPTION: Terminating the instance
+[[./img/02/15.png]]
+
+** Summary and Key Takeaways
+
+That was very productive session! With Docker, we've got really easily
+reproducible environment for compiling the Elixir app and generating the release
+we can safely deploy to AWS' instance. In this exercise I've used image of
+Amazon's system, but in fact - you can build your own image off any image you
+like and adjust the rest of ~Dockerfile~ accordingly!
+
+At this point we have an app ready and a way for compiling it which we have
+already tested in production-like environment, and there are a few gotchas worth
+highlighting:
+
+- When fetching Elixir's app dependencies for ~prod~ environment, the scripts
+  assume the existence of ~SECRET_KEY_BASE~. ~Phoenix~ offers [[https://hexdocs.pm/phoenix/Mix.Tasks.Phx.Gen.Secret.html][generating secret]]
+  script, but to avoid downloading dependencies twice, I used shell script to
+  generate it
+- When creating EC2 instance, we need to make sure the required ports are
+  configured properly, otherwise, it would be impossible to connect to the web
+  app. In our case, we needed to configure to traffic for port ~4000~
+- Finally, when allowing the WebSocket connections for LiveView, it was
+  important to provide proper configuration for our app, so the connection could
+  be validated and properly established
