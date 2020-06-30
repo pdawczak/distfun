@@ -20,7 +20,7 @@ In this blog post, it's the "Docker approach" I wanted to try...
 
 ** AWS' system on my computer?
 
-For the purpose of this App, I'll use the default AWS' system. In the [[https://hub.docker.com/][Docker hub]],
+For the purpose of this App, I'll use the default AWS' system. In the [[https://hub.docker.com/_/amazonlinux][Docker hub]],
 there is an official image that can be used for building your containers!
 
 Let's use it:
