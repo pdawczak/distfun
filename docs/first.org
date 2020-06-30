@@ -11,7 +11,7 @@ Docker.
 This will be a series of posts:
 
 - Build the application
-- Make it compile locally, but make it run in EC2
+- [[./second.org][Make it compile locally, but make it run in EC2]]
 - Create the whole infrastructure using Terraform
 
 It's not a comprehensive guide and will not be applicable in all use-cases, it
