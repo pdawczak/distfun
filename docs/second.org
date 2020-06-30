@@ -6,7 +6,7 @@ We are on the second step in our series of posts:
 - Make it compile locally, but make it run in EC2
 - Create the whole infrastructure using Terraform
 
-Now, when we have our application ready, it would be great to put it somewhere
+Now, [[./first.org][when we have our application ready]], it would be great to put it somewhere
 live. If you're any familiar with the state of compiling Elixir (or any BEAM
 base language), it is nothing like Java, that you can compile your application
 in one environment and deploy it to a different one.
