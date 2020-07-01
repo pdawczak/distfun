@@ -8,20 +8,22 @@ We are on the second step in our series of posts:
 
 Now, [[./first.org][when we have our application ready]], it would be great to put it somewhere
 live. If you're any familiar with the state of compiling Elixir (or any BEAM
-base language), it is nothing like Java, that you can compile your application
+based language), it is nothing like Java, that you can compile your application
 in one environment and deploy it to a different one.
 
 As unfortunate as it sounds, there are a few options - you can either download
 the source code to the machine where you're going to run your application and
-compile it there or, another option mentioned is to compile it in Docker, so
-you can replicate the destination's environment anywhere.
+compile it there or, another option is to compile it in Docker, so you can
+replicate the destination's environment anywhere.
 
 In this blog post, it's the "Docker approach" I wanted to try...
 
-** AWS' system on my computer?
+** DONE Amazon's system on my computer?
+   CLOSED: [2020-06-30 Tue 20:58]
 
-For the purpose of this App, I'll use the default AWS' system. In the [[https://hub.docker.com/_/amazonlinux][Docker hub]],
-there is an official image that can be used for building your containers!
+For the purpose of this App, I'll use the default system available in AWS. In
+the [[https://hub.docker.com/_/amazonlinux][Docker hub]], there is an official image that can be used for building your
+containers!
 
 Let's use it:
 
@@ -70,7 +72,7 @@ all unnecessary artifacts and remove the cache.
 At this point, we should have all low-level dependencies in place, so we can start
 installing and compiling languages we need.
 
-First, let's install Node we will use to compile our assets:
+First, let's install Node which we will use to compile our assets:
 
 #+begin_src dockerfile
 RUN curl -sL https://rpm.nodesource.com/setup_10.x | bash - \
@@ -107,8 +109,8 @@ RUN set -xe \
 ENV PATH="$PATH:/usr/src/elixir/bin"
 #+end_src
 
-We've got nearly all we need. Node, Erlang and Elixir, so next, let's install
-build tools: ~hex~ and ~rebar~.
+We've got nearly everything we need. Node, Erlang and Elixir, so next, let's
+install build tools: ~hex~ and ~rebar~.
 
 #+begin_src dockerfile
 RUN mix local.hex --force && \
@@ -130,8 +132,8 @@ COPY lib lib
 #+end_src
 
 All the above will be only required as a "one-off" kind of activity. Compiling
-the Application will be a little bit more involved and I didn't find a better way
-of expressing it than in a custom shell script.
+the Application will be a little bit more involved and I didn't find any better
+way of expressing it than in a custom shell script.
 
 Let's make ~Dockerfile~ to move it in and execute as a default command:
 
@@ -248,7 +250,7 @@ ls -la built_release
 #+end_src
 
 It wouldn't make much sense to untar it on my computer and start the app, as it
-won't work - remember? We've compiled it for the AWS system architecture!
+won't work - remember? We've compiled it for the AWS' system architecture!
 
 Let's start a new EC2 instance and give the release a go!
 
